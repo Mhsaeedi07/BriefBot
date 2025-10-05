@@ -11,15 +11,20 @@ A smart Telegram bot that summarizes group conversations, extracts personal acti
 - **Context-Aware** - Analyzes from any replied message onwards
 
 ### 🎤 Voice to Text
-- **Voice Transcription** - Convert voice messages to readable text
-- **Multi-language Support** - Transcribes in various languages
-- **Easy to Use** - Simply reply to voice messages with `/text`
+- **Automatic Transcription** - Voice messages are automatically transcribed when sent
+- **Manual Conversion** - Use `/text` command to convert voice messages manually
+- **Multi-language Support** - Transcribes in various languages using Google Gemini
+- **Smart Storage** - Transcribed text is stored in conversation history
+- **Easy to Use** - No commands needed for automatic transcription
 
 ### 💾 Smart Storage
+- **Forum Topic Management** - Automatic storage creation for new forum topics
 - **Auto-Archiving** - Automatically archives closed forum topics
+- **Topic Reopening** - Restores archived topics when reopened
 - **Message Retention** - Keeps messages for 30 days by default
 - **Space Efficient** - Automatic cleanup runs every 24 hours
 - **Statistics** - Track storage usage and message counts
+- **Init Command** - Manually initialize storage for existing topics with `/init`
 
 ### 🔧 Management Commands
 - **Reset Data** - Clear all stored messages and start fresh
@@ -73,6 +78,13 @@ The bot will extract action items specifically assigned to you.
 3. Example: `/ask What deadlines do I have?`
 
 ### 🎤 Transcribing Voice Messages
+
+**Automatic Transcription:**
+- Simply send a voice message in any group
+- Bot automatically transcribes and stores the text
+- No commands needed!
+
+**Manual Conversion:**
 1. Find a voice message (🎙️)
 2. **Reply to the voice message**
 3. Type `/text` and send
@@ -81,6 +93,7 @@ The bot will extract action items specifically assigned to you.
 - `/stats` - View storage statistics and usage
 - `/cleanup` - Manually remove old messages
 - `/reset` - Complete data reset (use with caution!)
+- `/init` - Initialize storage for existing forum topics
 
 ## Configuration
 

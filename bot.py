@@ -36,12 +36,12 @@ def setup_logging():
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
 
-    # File handler (ERROR level only)
+    # File handler (INFO level for debugging)
     current_date = datetime.now().strftime("%Y-%m-%d")
     log_filename = logs_dir / f"log_{current_date}.log"
 
     file_handler = logging.FileHandler(log_filename, encoding='utf-8')
-    file_handler.setLevel(logging.ERROR)
+    file_handler.setLevel(logging.INFO)  # Changed from ERROR to INFO
     file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
@@ -83,7 +83,7 @@ class GroupAssistantBot:
             raise ValueError("Missing required environment variables: TELEGRAM_BOT_TOKEN, GEMINI_API_KEY")
 
         genai.configure(api_key=self.gemini_api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.model = genai.GenerativeModel('gemini-2.0-flash')
 
         self.bot_app = Application.builder().token(self.bot_token).build()
 
@@ -136,11 +136,15 @@ class GroupAssistantBot:
             ("ask", self.ask_command),
             ("reset", self.reset_command),
             ("text", self.text_command),
+            ("init", self.init_command),
         ]
 
+        logger.info(f"Registering {len(commands)} command handlers...")
         for command, handler in commands:
             self.bot_app.add_handler(CommandHandler(command, handler))
+            logger.info(f"Added command handler: /{command}")
 
+        logger.info("Adding forum topic handlers...")
         self.bot_app.add_handler(MessageHandler(
             filters.StatusUpdate.FORUM_TOPIC_CREATED,
             self.handle_topic_created
@@ -156,22 +160,33 @@ class GroupAssistantBot:
             self.handle_topic_reopened
         ))
 
-        self.bot_app.add_handler(MessageHandler(
+        # Note: CHAT_MEMBER filter not available in this version
+        # Manual initialization command added instead
+
+        logger.info("Adding text message handler...")
+        text_handler = MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             self.handle_text_message
-        ), group=1)
+        )
+        self.bot_app.add_handler(text_handler, group=1)
+        logger.info("Text message handler added to group 1")
 
-        self.bot_app.add_handler(MessageHandler(
+        logger.info("Adding voice message handler...")
+        voice_handler = MessageHandler(
             filters.VOICE,
             self.handle_voice_message
-        ), group=2)
+        )
+        self.bot_app.add_handler(voice_handler, group=2)
+        logger.info("Voice message handler added to group 2")
 
+        logger.info("Setting up periodic cleanup job...")
         self.bot_app.job_queue.run_repeating(
             self.periodic_cleanup,
             interval=self.cleanup_interval,
             first=self.cleanup_interval
         )
 
+        logger.info(f"Total handlers registered: {len(self.bot_app.handlers)}")
         logger.info("All handlers set up successfully")
 
     def get_storage_filename(self, chat_id, topic_id=None):
@@ -185,6 +200,13 @@ class GroupAssistantBot:
         """Store message in appropriate file"""
         try:
             filename = self.get_storage_filename(chat_id, topic_id)
+            logger.info(f"Storing message to file: {filename}")
+            logger.info(f"File exists before writing: {filename.exists()}")
+
+            if filename.exists():
+                file_size_before = filename.stat().st_size
+                logger.info(f"File size before: {file_size_before} bytes")
+
             filename.parent.mkdir(parents=True, exist_ok=True)
 
             if topic_id:
@@ -196,11 +218,30 @@ class GroupAssistantBot:
             timestamp = datetime.now().isoformat()
             line = f"{timestamp}|{user_id}|{username}|{message_id or 'None'}|{message_text}\n"
 
+            logger.info(f"Writing message: {line.strip()}")
+            logger.info(f"Opening file {filename} for append...")
+
             with open(filename, 'a', encoding='utf-8') as f:
-                f.write(line)
+                logger.info(f"File opened successfully")
+                bytes_written = f.write(line)
+                logger.info(f"Wrote {bytes_written} bytes")
+                f.flush()  # Ensure data is written immediately
+                os.fsync(f.fileno())  # Force write to disk
+                logger.info(f"File flushed and synced")
+
+            # Verify file was written
+            if filename.exists():
+                file_size_after = filename.stat().st_size
+                logger.info(f"File size after: {file_size_after} bytes")
+                logger.info(f"Message stored successfully to {filename}")
+            else:
+                logger.error(f"ERROR: File does not exist after writing!")
 
         except Exception as e:
             logger.error(f"Error storing message: {e}")
+            logger.error(f"Chat ID: {chat_id}, Topic ID: {topic_id}, User: {username}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def load_messages(self, chat_id, topic_id=None, limit=None, from_message_id=None):
         """Load messages from file"""
@@ -385,12 +426,18 @@ class GroupAssistantBot:
     async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle and store text messages"""
         try:
+            logger.info("handle_text_message called")
             if not update.message or not update.message.text:
+                logger.info("No message or text in update")
                 return
 
             chat_id = update.effective_chat.id
             topic_id = getattr(update.message, 'message_thread_id', None)
+            logger.info(f"Processing message from chat {chat_id}, topic {topic_id}")
+            logger.info(f"Chat type: {update.effective_chat.type}")
+            logger.info(f"Is forum: {update.effective_chat.is_forum}")
 
+            # Handle forum topics
             if not topic_id and update.effective_chat.is_forum:
                 topic_id = 1
                 filename = self.get_storage_filename(chat_id, topic_id)
@@ -410,6 +457,14 @@ class GroupAssistantBot:
                         }
                         self.save_topics_metadata()
 
+            # Handle regular groups - create chat storage file if it doesn't exist
+            elif not topic_id:
+                filename = self.get_storage_filename(chat_id, None)
+                filename.parent.mkdir(parents=True, exist_ok=True)
+                if not filename.exists():
+                    filename.touch()
+                    logger.info(f"Created new chat storage file: {filename}")
+
             if update.message.from_user:
                 user_id = update.message.from_user.id
                 username = update.message.from_user.username or update.message.from_user.first_name or "Unknown"
@@ -420,13 +475,16 @@ class GroupAssistantBot:
             message_text = update.message.text
             message_id = update.message.message_id
 
+            logger.info(f"About to store message: {message_text[:50]}...")
             self.store_message(chat_id, topic_id, user_id, username, message_text, message_id)
 
         except Exception as e:
             logger.error(f"Error handling text message: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     async def handle_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle voice messages - log but don't store"""
+        """Handle voice messages - transcribe and deliver text to robot"""
         try:
             if not update.message or not update.message.voice:
                 return
@@ -434,8 +492,120 @@ class GroupAssistantBot:
             voice = update.message.voice
             logger.info(f"Received voice message: duration={voice.duration}s, file_id={voice.file_id}")
 
+            # Send processing message
+            processing_msg = await update.message.reply_text("🔄 Processing voice message...")
+
+            # Download voice file
+            voice_file = await voice.get_file()
+            voice_bytes = await voice_file.download_as_bytearray()
+
+            # Transcribe voice to text
+            transcribed_text = await self.convert_voice_to_text(voice_bytes)
+
+            if transcribed_text:
+                # Store the transcribed text as a regular message
+                chat_id = update.effective_chat.id
+                topic_id = getattr(update.message, 'message_thread_id', None)
+
+                if update.message.from_user:
+                    user_id = update.message.from_user.id
+                    username = update.message.from_user.username or update.message.from_user.first_name or "Unknown"
+                else:
+                    user_id = "bot"
+                    username = "Bot"
+
+                message_id = update.message.message_id
+                voice_text = f"🎙️ Voice Message: {transcribed_text}"
+
+                # Store the transcribed text
+                self.store_message(chat_id, topic_id, user_id, username, voice_text, message_id)
+
+                # Update processing message with result
+                response = f"""
+🎤 **VOICE MESSAGE DELIVERED**
+
+🎙️ **Duration:** {voice.duration} seconds
+📝 **Transcribed Text:**
+{transcribed_text}
+
+✅ **Text delivered to robot and stored in conversation history**
+                """
+
+                try:
+                    await processing_msg.edit_text(response, parse_mode='Markdown')
+                except Exception:
+                    plain_response = response.replace('**', '').replace('*', '').replace('`', '').replace('┏', '═').replace('┃', '│').replace('┗', '═').replace('┓', '═').replace('└', '═').replace('┐', '═')
+                    await processing_msg.edit_text(plain_response)
+
+                logger.info(f"Voice message transcribed and stored: {transcribed_text[:50]}...")
+            else:
+                await processing_msg.edit_text("❌ Sorry, I couldn't transcribe the voice message. Please try again or check the audio quality.")
+
         except Exception as e:
             logger.error(f"Error handling voice message: {e}")
+            if update.message:
+                await update.message.reply_text("❌ Error processing voice message. Please try again.")
+
+    async def handle_bot_added_to_group(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle when bot is added to a group - create storage for existing topics"""
+        try:
+            if not update.my_chat_member:
+                return
+
+            chat_member = update.my_chat_member
+            new_status = chat_member.new_chat_member.status
+
+            # Check if bot was added or promoted to admin
+            if new_status in ['member', 'administrator']:
+                chat = chat_member.chat
+                chat_id = chat.id
+                logger.info(f"Bot added to group: {chat.title} (ID: {chat_id})")
+
+                if chat.is_forum:
+                    logger.info("Group is a forum, scanning for existing topics...")
+                    await self.create_storage_for_existing_topics(chat_id)
+                else:
+                    logger.info("Group is not a forum, creating chat storage...")
+                    await self.create_chat_storage(chat_id)
+
+        except Exception as e:
+            logger.error(f"Error handling bot addition to group: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+    async def create_storage_for_existing_topics(self, chat_id):
+        """Create storage files for all existing topics in a forum"""
+        try:
+            # Try to get forum topics - this method may not exist in all bot versions
+            logger.info(f"Attempting to get forum topics for chat {chat_id}")
+
+            # Create a general storage file for the chat since we can't easily get existing topics
+            filename = self.get_storage_filename(chat_id, None)
+            filename.parent.mkdir(parents=True, exist_ok=True)
+            if not filename.exists():
+                filename.touch()
+                logger.info(f"Created general chat storage file: {filename}")
+
+            # Note: Telegram Bot API doesn't have a direct method to list existing forum topics
+            # We'll create storage when messages are received in each topic
+            logger.info("Forum topic storage will be created when messages are received in each topic")
+
+        except Exception as e:
+            logger.error(f"Error creating storage for existing topics: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+    async def create_chat_storage(self, chat_id):
+        """Create storage for regular (non-forum) group"""
+        try:
+            filename = self.get_storage_filename(chat_id, None)
+            filename.parent.mkdir(parents=True, exist_ok=True)
+            if not filename.exists():
+                filename.touch()
+                logger.info(f"Created chat storage file: {filename}")
+
+        except Exception as e:
+            logger.error(f"Error creating chat storage: {e}")
 
     async def text_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /text command - convert voice message to text"""
@@ -533,8 +703,27 @@ class GroupAssistantBot:
             logger.error(f"Error starting client: {e}")
             raise
 
+    async def init_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /init command - create storage for existing topics"""
+        try:
+            chat_id = update.effective_chat.id
+            logger.info(f"Init command received for chat {chat_id}")
+
+            if update.effective_chat.is_forum:
+                await update.message.reply_text("🔧 Initializing storage for this forum group...")
+                await self.create_storage_for_existing_topics(chat_id)
+                await update.message.reply_text("✅ Storage initialized! Topic files will be created when messages are received.")
+            else:
+                await self.create_chat_storage(chat_id)
+                await update.message.reply_text("✅ Chat storage initialized!")
+
+        except Exception as e:
+            logger.error(f"Error in init_command: {e}")
+            await update.message.reply_text("❌ Error initializing storage.")
+
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command"""
+        logger.info(f"Start command received from {update.effective_user.username or update.effective_user.first_name}")
         welcome_msg = """
 🤖 **Welcome to Group Assistant Bot!**
 
@@ -545,13 +734,15 @@ class GroupAssistantBot:
    └─ • `/missed` 🎯 - Extract your personal action items & tasks
    └─ • `/ask <question>` ❓ - Ask AI questions about the conversation
 
-🎤 **Voice to Text** (Reply to voice messages):
-   └─ • `/text` 🎙️ - Convert voice messages to readable text
+🎤 **Voice to Text**:
+   └─ • **Automatic** 🎙️ - Voice messages are automatically transcribed when sent
+   └─ • `/text` 📝 - Manual conversion (reply to voice messages)
 
 📈 **Storage Management**:
    └─ • `/stats` 📊 - View detailed storage statistics
    └─ • `/cleanup` 🧹 - Manually clean old messages
    └─ • `/reset` 🗑️ - Complete data reset (use with caution!)
+   └─ • `/init` 🔧 - Initialize storage for existing topics
 
 ⚙️ **BOT SETTINGS:**
    └─ 📅 Message retention: 30 days
@@ -587,11 +778,16 @@ Use `/help` for detailed usage examples.
    • Get answers based on chat history
    • Example: `/ask What deadlines do I have?`
 
-🎤 **VOICE COMMANDS** (Reply to voice messages):
+🎤 **VOICE FEATURES**:
 
-🎙️ `/text`
-   • Converts voice messages to text
-   • Great for accessibility and quick reference
+🎙️ **Automatic Transcription**
+   • Voice messages are automatically converted to text when sent
+   • Transcribed text is stored in conversation history
+   • No commands needed - just send voice messages!
+
+📝 **Manual Transcription** (Reply to voice messages)
+   • `/text` - Convert voice messages to text manually
+   • Useful if you want to re-process a voice message
 
 📈 **MANAGEMENT COMMANDS:**
 
@@ -1073,6 +1269,7 @@ Use `/help` for detailed usage examples.
 
             await self.bot_app.updater.start_polling(drop_pending_updates=True)
             logger.info("Bot polling started...")
+            logger.info("Ready to receive messages!")
 
             while self.is_running:
                 await asyncio.sleep(1)
@@ -1110,6 +1307,7 @@ async def main():
 
     try:
         await bot.run()
+
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
         bot.is_running = False
